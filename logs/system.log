@@ -298,3 +298,11 @@ requests.exceptions.RetryError: HTTPSConnectionPool(host='www.instagram.com', po
 2026-02-28 19:26:41,069 [scheduler] INFO: 🚀 Scheduler started
 2026-02-28 19:26:46,681 [scheduler] INFO: 🛑 Scheduler stopped
 2026-02-28 19:26:52,333  [manager]  INFO  AccountManager initialized with 1 account(s)
+2026-02-28 19:27:03,465  [instagrapi]  INFO  https://i.instagram.com/api/v1/feed/timeline/
+2026-02-28 19:27:05,807  [private_request]  INFO  dhuniwaalebaba [200] POST https://i.instagram.com/api/v1/feed/timeline/ (385.0.0.47.74, OnePlus 6T Dev)
+2026-02-28 19:27:55,880  [instagrapi]  INFO  https://i.instagram.com/api/v1/feed/timeline/
+2026-02-28 19:27:57,966  [private_request]  INFO  dhuniwaalebaba [200] POST https://i.instagram.com/api/v1/feed/timeline/ (385.0.0.47.74, OnePlus 6T Dev)
+2026-02-28 19:28:05,884  [instagrapi]  INFO  https://i.instagram.com/api/v1/media/3841057355895893380/like/
+2026-02-28 19:28:06,636  [private_request]  INFO  dhuniwaalebaba [200] POST https://i.instagram.com/api/v1/media/3841057355895893380/like/ (385.0.0.47.74, OnePlus 6T Dev)
+2026-02-28 19:28:14,559  [instagrapi]  INFO  https://i.instagram.com/api/v1/media/3830682769915908763/like/
+2026-02-28 19:28:15,334  [private_request]  INFO  dhuniwaalebaba [200] POST https://i.instagram.com/api/v1/media/3830682769915908763/like/ (385.0.0.47.74, OnePlus 6T Dev)
