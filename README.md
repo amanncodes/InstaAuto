@@ -1,10 +1,10 @@
-# 🤖 InstaBot — Multi-Account Instagram Automation
+# InstaBot — Multi-Account Instagram Automation
 
 A powerful, modular Python system for automating multiple Instagram accounts using [instagrapi](https://github.com/subzeroid/instagrapi).
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 insta_bot/
@@ -23,7 +23,7 @@ insta_bot/
 
 ---
 
-## 🚀 Setup
+## Setup
 
 ### 1. Install dependencies
 
@@ -53,7 +53,7 @@ python cli.py
 
 ---
 
-## 🎛️ Features
+## Features
 
 ### Actions Available
 
@@ -84,7 +84,7 @@ Sessions are saved in `sessions/<username>.json` so you don't have to re-login e
 
 ---
 
-## ⚙️ Config Reference
+## Config Reference
 
 ### Accounts
 ```yaml
@@ -149,7 +149,7 @@ schedule:
 
 ---
 
-## ⚠️ Safety Tips
+## Safety Tips
 
 1. **Use proxies** — assign a unique proxy per account to avoid IP bans
 2. **Keep action counts low** — Instagram rate-limits aggressively:
@@ -163,14 +163,14 @@ schedule:
 
 ---
 
-## 📝 Logs
+## Logs
 
 - `logs/system.log` — global system log
 - `logs/<username>.log` — per-account log with full action history
 
 ---
 
-## 🧪 Running a Quick Test (No Full Login)
+## Running a Quick Test (No Full Login)
 
 You can test the config loading without logging in:
 
