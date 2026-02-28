@@ -1,0 +1,134 @@
+# ════════════════════════════════════════════════════════
+# InstaBot v2.0 — Configuration File
+# Copy this to config.yaml and fill in your details
+# ════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────
+# ACCOUNTS
+# ─────────────────────────────────────────────
+accounts:
+  - username: "your_account_1"
+    password: "your_password_1"
+    proxy: ""                         # optional: "http://user:pass@host:port"
+
+    # Behaviour profile: casual | active | power
+    # casual = slow, reads everything, lots of pauses
+    # active = moderate speed (recommended default)
+    # power  = fast, efficient browsing
+    behaviour_profile: "active"
+
+    # Activity windows — bot only runs during these hours
+    # Remove or leave empty to run anytime
+    activity_windows:
+      - { start: "07:30", end: "09:00" }
+      - { start: "12:00", end: "13:30" }
+      - { start: "18:00", end: "20:30" }
+      - { start: "21:30", end: "23:00" }
+
+  - username: "your_account_2"
+    password: "your_password_2"
+    proxy: ""
+    behaviour_profile: "casual"
+    activity_windows:
+      - { start: "08:00", end: "10:00" }
+      - { start: "17:00", end: "21:00" }
+
+  # - username: "account_3"
+  #   password: "password_3"
+  #   proxy: "http://proxyuser:proxypass@12.34.56.78:8080"
+  #   behaviour_profile: "power"
+
+
+# ─────────────────────────────────────────────
+# DEFAULT SETTINGS
+# ─────────────────────────────────────────────
+defaults:
+  comments:
+    - "Amazing! 🔥"
+    - "Love this content! 😍"
+    - "This is incredible ✨"
+    - "Great shot! 📸"
+    - "So inspiring! 💯"
+    - "Keep it up! 👏"
+    - "Wow, beautiful! 😊"
+    - "This made my day 🙌"
+    - "Goals! 💪"
+    - "Stunning as always 🌟"
+
+  dm_replies:
+    price:    "Thanks for asking! Slide into our DMs for the latest pricing 💬"
+    collab:   "We'd love to collaborate! Email us at hello@yourbrand.com 🤝"
+    shipping: "We ship worldwide! Check the link in our bio for details 🌍"
+    how:      "Great question! Check our highlights for more info 👆"
+    _default: "Thanks for reaching out! We'll get back to you soon 🙏"
+
+
+# ─────────────────────────────────────────────
+# ONE-SHOT TASKS (run via "Run Config Tasks")
+# ─────────────────────────────────────────────
+tasks:
+  - action: "like_hashtag"
+    hashtag: "photography"
+    count: 15
+    delay_after: 10
+
+  # - action: "engage_hashtag"
+  #   hashtag: "fitnessmotivation"
+  #   count: 20
+  #   like: true
+  #   comment: true
+  #   follow: false
+  #   comments:
+  #     - "Incredible! 💪"
+  #     - "Goals! 🔥"
+  #   delay_after: 20
+
+  # - action: "follow_followers_of"
+  #   target: "competitor_account"
+  #   count: 30
+  #   delay_after: 30
+
+  # - action: "auto_reply_dms"
+  #   reply_map:
+  #     price: "DM us for pricing!"
+  #     _default: "Thanks 🙏"
+  #   max_threads: 20
+  #   delay_after: 5
+
+
+# ─────────────────────────────────────────────
+# SCHEDULE (automated recurring tasks)
+# interval_minutes OR run_at (HH:MM daily)
+# ─────────────────────────────────────────────
+schedule:
+  # Full human session — browse feed, explore, reels naturally
+  - task:
+      action: "watch_feed_stories"
+      count: 30
+    run_at: "08:30"
+    concurrent: true
+
+  # Like hashtag posts every 2 hours
+  - task:
+      action: "like_hashtag"
+      hashtag: "photography"
+      count: 20
+    interval_minutes: 120
+    concurrent: true
+
+  # Auto-reply DMs every 45 minutes
+  - task:
+      action: "auto_reply_dms"
+      reply_map:
+        price: "Check our bio link for pricing!"
+        _default: "Thanks for reaching out 🙏"
+      max_threads: 30
+    interval_minutes: 45
+    concurrent: true
+
+  # Nightly unfollow cleanup
+  - task:
+      action: "unfollow_non_followers"
+      limit: 30
+    run_at: "22:30"
+    concurrent: true
