@@ -1,3 +1,4 @@
 # ignore runtime files
 logs/
 *.log
+data/instabot.db
