@@ -1,6 +1,7 @@
 """
-InstaBot CLI  v2.0
+InstaBot CLI  v2.1
 Clean board-style interface. No emojis. Concurrent threading.
+Persistent stats — all-time and 14-day history across sessions.
 """
 
 import sys
@@ -18,10 +19,11 @@ from rich.live    import Live
 from rich.text    import Text
 from rich         import box
 
-from config_loader  import load_config
+from config_loader   import load_config
 from account_manager import AccountManager
-from scheduler      import build_scheduler_from_config
-from task_runner    import menu_manual_trigger
+from scheduler       import build_scheduler_from_config
+from task_runner     import menu_manual_trigger
+import stats_store
 
 console = Console()
 
@@ -40,7 +42,7 @@ BANNER = """\
   ██║██║╚██╗██║╚════██║   ██║   ██╔══██║██╔══██╗██║   ██║   ██║
   ██║██║ ╚████║███████║   ██║   ██║  ██║██████╔╝╚██████╔╝   ██║
   ╚═╝╚═╝  ╚═══╝╚══════╝   ╚═╝   ╚═╝  ╚═╝╚═════╝  ╚═════╝    ╚═╝
-[/bold white][dim]  Multi-Account Instagram Automation  ·  v2.0[/dim]
+[/bold white][dim]  Multi-Account Instagram Automation  ·  v2.1[/dim]
 """
 
 def hdr(title: str):
@@ -68,7 +70,7 @@ def warn(msg: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LIVE DASHBOARD
+# LIVE DASHBOARD  (current session only — fast, no disk read)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_dashboard(manager) -> Table:
@@ -142,7 +144,7 @@ def print_accounts_table(manager):
 
 def print_stats_table(stats):
     t = Table(show_header=True, header_style="bold cyan",
-              box=box.SIMPLE_HEAD, title="  ACCOUNT STATS")
+              box=box.SIMPLE_HEAD, title="  ACCOUNT STATS  (this session)")
     for col, kw in [
         ("Username",       {"style":"bold white","min_width":18}),
         ("Followers",      {"justify":"right"}),
@@ -195,11 +197,186 @@ def done():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MENU HELPERS  — consistent input style
+# MENU HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def ask_concurrent() -> bool:
     return Confirm.ask("  Run accounts concurrently?", default=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ALL-TIME PERSISTENT STATS  (reads from data/stats.json)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def menu_alltime_stats(manager):
+    hdr("ALL-TIME STATS  —  data/stats.json")
+
+    opts = [
+        ("1", "All accounts overview          totals + 7-day summary"),
+        ("2", "14-day daily breakdown         one account at a time"),
+        ("3", "Follower growth history        up to 30 snapshots"),
+        ("0", "Back"),
+    ]
+    for k, v in opts: console.print(f"  [{k}]  {v}")
+    rule()
+    choice = Prompt.ask("  Select", choices=[o[0] for o in opts])
+    if choice == "0": return
+
+    # ── 1. All accounts overview ─────────────────────────────────────────────
+    if choice == "1":
+        summaries = stats_store.get_all_accounts_summary()
+        if not summaries:
+            warn("No persistent stats found yet — run some tasks first")
+            return
+
+        t = Table(
+            title="  ALL-TIME OVERVIEW",
+            show_header=True, header_style="bold cyan",
+            box=box.SIMPLE_HEAD, expand=True,
+        )
+        t.add_column("Account",       style="bold white", min_width=18)
+        t.add_column("First Seen",    style="dim",        min_width=10)
+        t.add_column("Last Active",   style="dim",        min_width=16)
+        t.add_column("Followers",     justify="right")
+        t.add_column("Likes ∑",       justify="right")
+        t.add_column("Comments ∑",    justify="right")
+        t.add_column("Follows ∑",     justify="right")
+        t.add_column("Unfollow ∑",    justify="right")
+        t.add_column("DMs ∑",         justify="right")
+        t.add_column("Stories ∑",     justify="right")
+        t.add_column("Likes 7d",      justify="right", style="dim")
+        t.add_column("Follows 7d",    justify="right", style="dim")
+
+        for s in summaries:
+            at   = s["all_time"]
+            w7   = s["last_7_days"]
+            first = (s["first_seen"] or "—")[:10]
+            last  = (s["last_active"] or "—")[:16].replace("T", " ")
+            t.add_row(
+                s["username"],
+                first,
+                last,
+                str(s["followers"]),
+                str(at["likes"]),
+                str(at["comments"]),
+                str(at["follows"]),
+                str(at["unfollows"]),
+                str(at["dms"]),
+                str(at["story_views"]),
+                str(w7["likes"]),
+                str(w7["follows"]),
+            )
+        console.print(t)
+
+    # ── 2. 14-day daily breakdown ────────────────────────────────────────────
+    elif choice == "2":
+        summaries = stats_store.get_all_accounts_summary()
+        if not summaries:
+            warn("No persistent stats found yet")
+            return
+
+        usernames = [s["username"] for s in summaries]
+        if len(usernames) == 1:
+            username = usernames[0]
+        else:
+            console.print("  [dim]Known accounts: " + ", ".join(usernames) + "[/dim]")
+            username = Prompt.ask("  Account username", choices=usernames)
+
+        series = stats_store.get_daily_series(username, days=14)
+
+        t = Table(
+            title=f"  14-DAY DAILY BREAKDOWN  @{username}",
+            show_header=True, header_style="bold cyan",
+            box=box.SIMPLE_HEAD,
+        )
+        t.add_column("Date",       style="bold white", min_width=12)
+        t.add_column("Likes",      justify="right")
+        t.add_column("Comments",   justify="right")
+        t.add_column("Follows",    justify="right")
+        t.add_column("Unfollows",  justify="right")
+        t.add_column("DMs",        justify="right")
+        t.add_column("Stories",    justify="right")
+        t.add_column("Total",      justify="right", style="bold")
+
+        for day in series:
+            total = sum(day.get(k, 0) for k in stats_store.ACTION_KEYS)
+            # Highlight today's row
+            date_str = day["date"]
+            if date_str == datetime.now().strftime("%Y-%m-%d"):
+                date_str = f"[bright_cyan]{date_str}  ◄[/bright_cyan]"
+            t.add_row(
+                date_str,
+                str(day.get("likes", 0)),
+                str(day.get("comments", 0)),
+                str(day.get("follows", 0)),
+                str(day.get("unfollows", 0)),
+                str(day.get("dms", 0)),
+                str(day.get("story_views", 0)),
+                f"[bold]{total}[/bold]" if total else "[dim]—[/dim]",
+            )
+        console.print(t)
+
+    # ── 3. Follower growth ───────────────────────────────────────────────────
+    elif choice == "3":
+        summaries = stats_store.get_all_accounts_summary()
+        if not summaries:
+            warn("No persistent stats found yet")
+            return
+
+        usernames = [s["username"] for s in summaries]
+        if len(usernames) == 1:
+            username = usernames[0]
+        else:
+            console.print("  [dim]Known accounts: " + ", ".join(usernames) + "[/dim]")
+            username = Prompt.ask("  Account username", choices=usernames)
+
+        snapshots = stats_store.get_follower_growth(username)
+        if not snapshots:
+            warn(f"No follower snapshots for @{username} yet — run Account Stats (option 9) to capture one")
+            return
+
+        t = Table(
+            title=f"  FOLLOWER GROWTH  @{username}  [{len(snapshots)} snapshots]",
+            show_header=True, header_style="bold cyan",
+            box=box.SIMPLE_HEAD,
+        )
+        t.add_column("Timestamp",   style="dim",        min_width=19)
+        t.add_column("Followers",   justify="right",    style="bold white")
+        t.add_column("Change",      justify="right")
+        t.add_column("Following",   justify="right")
+        t.add_column("Posts",       justify="right")
+
+        prev_followers = None
+        for snap in snapshots:
+            followers = snap.get("followers", 0)
+            if prev_followers is not None:
+                delta = followers - prev_followers
+                if delta > 0:
+                    change = f"[bright_green]+{delta}[/bright_green]"
+                elif delta < 0:
+                    change = f"[bright_red]{delta}[/bright_red]"
+                else:
+                    change = "[dim]—[/dim]"
+            else:
+                change = "[dim]first[/dim]"
+            prev_followers = followers
+
+            t.add_row(
+                snap.get("ts", "?")[:19].replace("T", " "),
+                str(followers),
+                change,
+                str(snap.get("following", "?")),
+                str(snap.get("media_count", "?")),
+            )
+        console.print(t)
+
+        # Quick growth summary
+        if len(snapshots) >= 2:
+            first_f = snapshots[0].get("followers", 0)
+            last_f  = snapshots[-1].get("followers", 0)
+            net     = last_f - first_f
+            sign    = "+" if net >= 0 else ""
+            info(f"Net change since first snapshot:  {sign}{net} followers")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -392,7 +569,7 @@ def menu_dms(manager, cfg):
         usernames = [u.strip() for u in Prompt.ask("  Usernames  [comma-separated]").split(",")]
         messages  = [m.strip() for m in Prompt.ask("  Messages  [pipe-separated |]").split("|")]
         fn = lambda b: b.send_dm_to_list(usernames, messages)
-        run_on_bots(bots, fn, concurrent=False)   # bulk DMs — always sequential
+        run_on_bots(bots, fn, concurrent=False)
 
     elif choice == "3":
         reply_map  = cfg.get("defaults",{}).get("dm_replies",{"_default":"Thanks for reaching out!"})
@@ -474,8 +651,9 @@ MENU_ITEMS = [
     ("5", "Watch Stories        user  or  feed"),
     ("6", "Direct Messages      send  bulk  auto-reply  inbox"),
     ("7", "Hashtag Engagement   like  comment  follow"),
-    ("8", "Live Dashboard       real-time account stats"),
-    ("9", "Account Stats        followers  posts  today"),
+    ("8", "Live Dashboard       real-time account stats  [this session]"),
+    ("9", "Account Stats        followers  posts  today  [+saves snapshot]"),
+    ("A", "All-Time Stats       persistent history  overview  daily  growth"),
     ("M", "Manual Task Trigger  build  presets  history  quick-fire"),
     ("T", "Run Config Tasks     tasks defined in config.yaml"),
     ("S", "Scheduler            recurring automated jobs"),
@@ -485,6 +663,7 @@ MENU_ITEMS = [
 def main():
     os.makedirs("logs",     exist_ok=True)
     os.makedirs("sessions", exist_ok=True)
+    os.makedirs("data",     exist_ok=True)   # persistent stats directory
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  [%(name)s]  %(levelname)s  %(message)s",
@@ -534,6 +713,8 @@ def main():
             with console.status("[bold cyan]  Fetching stats...[/bold cyan]"):
                 stats = manager.get_all_stats()
             print_stats_table(stats)
+        elif choice == "A":
+            menu_alltime_stats(manager)
         elif choice == "M": menu_manual_trigger(manager, cfg)
         elif choice == "T":
             tasks = cfg.get("tasks", [])

@@ -6,6 +6,7 @@ Instagram Bot Engine
 - Full exception handler: BadPassword, ReloginAttemptExceeded,
   FeedbackRequired, PleaseWaitFewMinutes, ChallengeRequired
 - No emojis. Max wait capped at 150s.
+- Persistent stats via stats_store (survives across sessions).
 """
 
 import time
@@ -22,6 +23,10 @@ from instagrapi.exceptions import (
 )
 
 from human_behaviour import HumanBehaviour, SessionState, lp, lw, MAX_WAIT
+from stats_store import (
+    record_action as _persist_action,
+    record_snapshot as _persist_snapshot,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DEVICE PRESETS  — randomised per account so each looks like a different phone
@@ -98,6 +103,13 @@ class InstagramBot:
 
     def _lp(self, msg: str, level: str = "info"):
         lp(self.username, msg, level)
+
+    # ── PERSIST HELPER ────────────────────────────────────────────────────────
+
+    def _record(self, action_type: str, count: int = 1):
+        """Record action in both the in-memory session AND the persistent store."""
+        self.session.record_action(action_type, count)
+        _persist_action(self.username, action_type, count)
 
     # ── AUTH & RELOGIN ────────────────────────────────────────────────────────
 
@@ -262,7 +274,7 @@ class InstagramBot:
                 try:
                     self._lp(f"  Sending like  {media.pk}", "api")
                     self.cl.media_like(media.pk)
-                    self.session.record_action("likes")
+                    self._record("likes")   # ← persists to disk
                     liked += 1
                     self._lp(f"  Liked  @{target_username}  {media.pk}  (today:{self.session.actions_today['likes']})", "success")
                     self.human.pause_between_posts()
@@ -296,7 +308,7 @@ class InstagramBot:
                 try:
                     self._lp(f"  Sending like", "api")
                     self.cl.media_like(media.pk)
-                    self.session.record_action("likes")
+                    self._record("likes")   # ← persists to disk
                     liked += 1
                     self._lp(f"  Liked  @{uname}  (today:{self.session.actions_today['likes']})", "success")
                     self.human.pause_between_posts()
@@ -334,7 +346,7 @@ class InstagramBot:
                 try:
                     self._lp(f"  Posting comment  \"{text}\"", "api")
                     self.cl.media_comment(media.pk, text)
-                    self.session.record_action("comments")
+                    self._record("comments")   # ← persists to disk
                     commented += 1
                     self._lp(f"  Commented  (today:{self.session.actions_today['comments']})", "success")
                     self.human.pause_between_posts()
@@ -370,7 +382,7 @@ class InstagramBot:
                 try:
                     self._lp(f"  Posting comment  \"{text}\"", "api")
                     self.cl.media_comment(media.pk, text)
-                    self.session.record_action("comments")
+                    self._record("comments")   # ← persists to disk
                     commented += 1
                     self._lp(f"  Commented  @{uname}  (today:{self.session.actions_today['comments']})", "success")
                     self.human.pause_between_posts()
@@ -400,7 +412,7 @@ class InstagramBot:
                 self.human.visit_profile_and_scroll(self.cl, user_id)
                 self._lp(f"  Sending follow  @{username}", "api")
                 self.cl.user_follow(user_id)
-                self.session.record_action("follows")
+                self._record("follows")   # ← persists to disk
                 followed += 1
                 self._lp(f"  Followed  @{username}  (today:{self.session.actions_today['follows']})", "success")
                 self.human.pause_between_posts()
@@ -438,7 +450,7 @@ class InstagramBot:
             try:
                 user_id = self.cl.user_id_from_username(username)
                 self.cl.user_unfollow(user_id)
-                self.session.record_action("unfollows")
+                self._record("unfollows")   # ← persists to disk
                 unfollowed += 1
                 self._lp(f"  Unfollowed  @{username}  (today:{self.session.actions_today['unfollows']})", "success")
                 self.human.pause_between_posts()
@@ -488,7 +500,7 @@ class InstagramBot:
                 self.human.pause_between_story_taps()
             self._lp(f"Marking {len(story_ids)} frames seen", "api")
             self.cl.story_seen(story_ids)
-            self.session.record_action("story_views", len(story_ids))
+            self._record("story_views", len(story_ids))   # ← persists to disk
             watched = len(story_ids)
             self._lp(f"Stories watched:{watched}  (today:{self.session.actions_today['story_views']})", "success")
         except UserNotFound:
@@ -516,7 +528,7 @@ class InstagramBot:
             self.human.simulate_typing(message)
             self._lp(f"Sending DM via API", "api")
             self.cl.direct_send(message, [user_id])
-            self.session.record_action("dms")
+            self._record("dms")   # ← persists to disk
             self._lp(f"DM sent  @{target_username}  (today:{self.session.actions_today['dms']})", "success")
             self.human.pause_between_posts()
             return True
@@ -637,7 +649,7 @@ class InstagramBot:
                     try:
                         self._lp(f"  Sending like", "api")
                         self.cl.media_like(media.pk)
-                        self.session.record_action("likes")
+                        self._record("likes")   # ← persists to disk
                         results["liked"] += 1
                         self._lp(f"  Liked  @{uname}  (today:{self.session.actions_today['likes']})", "success")
                     except Exception as e:
@@ -650,7 +662,7 @@ class InstagramBot:
                     try:
                         self._lp(f"  Posting comment  \"{text}\"", "api")
                         self.cl.media_comment(media.pk, text)
-                        self.session.record_action("comments")
+                        self._record("comments")   # ← persists to disk
                         results["commented"] += 1
                         self._lp(f"  Commented  (today:{self.session.actions_today['comments']})", "success")
                     except Exception as e:
@@ -661,7 +673,7 @@ class InstagramBot:
                     try:
                         self._lp(f"  Sending follow  @{uname}", "api")
                         self.cl.user_follow(media.user.pk)
-                        self.session.record_action("follows")
+                        self._record("follows")   # ← persists to disk
                         results["followed"] += 1
                         self._lp(f"  Followed  @{uname}  (today:{self.session.actions_today['follows']})", "success")
                     except Exception as e:
@@ -685,6 +697,15 @@ class InstagramBot:
             user_id = self.cl.user_id_from_username(self.username)
             info    = self.cl.user_info(user_id)
             self._lp(f"Stats fetched  @{self.username}", "success")
+
+            # ── Persist a follower snapshot so growth is tracked over time ──
+            _persist_snapshot(
+                self.username,
+                followers   = info.follower_count,
+                following   = info.following_count,
+                media_count = info.media_count,
+            )
+
             return {
                 "username":    self.username,
                 "full_name":   info.full_name,
