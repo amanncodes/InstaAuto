@@ -6,3 +6,5 @@ __pycache__/
 *.pyc
 *.jpg
 *.jpeg
+data/
+__pycache__/
