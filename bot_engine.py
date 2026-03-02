@@ -26,7 +26,9 @@ from human_behaviour import HumanBehaviour, SessionState, lp, lw, MAX_WAIT
 from stats_store import (
     record_action as _persist_action,
     record_snapshot as _persist_snapshot,
+    get_daily_series as _get_daily_series,
 )
+from poster import Publisher
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DEVICE PRESETS  — randomised per account so each looks like a different phone
@@ -80,6 +82,11 @@ class InstagramBot:
         self.human    = HumanBehaviour(self.session)
         self.activity_windows = account_cfg.get("activity_windows", None)
 
+        # ── Seed today's counters from the persistent DB ──────────────────
+        # Without this, the in-memory session always starts at 0 even if
+        # the bot already did work earlier today in a previous run.
+        self._seed_today_from_db()
+
         Path("sessions").mkdir(exist_ok=True)
         self.session_file = Path(f"sessions/{self.username}.json")
 
@@ -101,8 +108,35 @@ class InstagramBot:
         if self.proxy:
             self.cl.set_proxy(self.proxy)
 
+        # Publisher is lazy-initialised on first use after login
+        self._publisher: Publisher | None = None
+
+    @property
+    def publisher(self) -> Publisher:
+        if self._publisher is None:
+            self._publisher = Publisher(self)
+        return self._publisher
+
     def _lp(self, msg: str, level: str = "info"):
         lp(self.username, msg, level)
+
+    # ── STARTUP: seed today’s counts from DB ───────────────────────────────────────────
+
+    def _seed_today_from_db(self):
+        """
+        Load today’s action totals from SQLite into the in-memory session.
+        Called once in __init__ so the dashboard and daily limits are correct
+        even after the terminal was closed and reopened mid-day.
+        """
+        try:
+            series = _get_daily_series(self.username, days=1)
+            if series:
+                today = series[0]
+                for key in self.session.actions_today:
+                    if key in today and today[key] > 0:
+                        self.session.actions_today[key] = today[key]
+        except Exception:
+            pass  # DB may not exist yet on very first run
 
     # ── PERSIST HELPER ────────────────────────────────────────────────────────
 
@@ -686,6 +720,67 @@ class InstagramBot:
             self._handle_exception(e, "engage_hashtag")
 
         self._lp(f"─── DONE  liked:{results['liked']}  commented:{results['commented']}  followed:{results['followed']}", "success")
+        return results
+
+
+    # ── PUBLISHING ────────────────────────────────────────────────────────────
+
+    def post_photo(self, image_path: str, meta: dict = None) -> dict:
+        """Post a single photo. meta keys: caption, hashtags, location, usertags."""
+        if not self._guard(): return {"ok": False, "error": "not logged in"}
+        return self.publisher.post_photo(image_path, meta or {})
+
+    def post_carousel(self, image_paths: list, meta: dict = None) -> dict:
+        """Post a carousel (2-10 images). meta keys: caption, hashtags, location."""
+        if not self._guard(): return {"ok": False, "error": "not logged in"}
+        return self.publisher.post_carousel(image_paths, meta or {})
+
+    def post_story_photo(self, image_path: str, meta: dict = None) -> dict:
+        """Post a photo story. meta keys: mentions, hashtag_sticker, location,
+        link, music_track_id, music_from_reel."""
+        if not self._guard(): return {"ok": False, "error": "not logged in"}
+        return self.publisher.post_story_photo(image_path, meta or {})
+
+    def post_story_video(self, video_path: str, meta: dict = None) -> dict:
+        """Post a video story. Same meta keys as post_story_photo."""
+        if not self._guard(): return {"ok": False, "error": "not logged in"}
+        return self.publisher.post_story_video(video_path, meta or {})
+
+    def publish_from_queue(self) -> list:
+        """
+        Scan posts/queue/ and publish all ready posts assigned to this account.
+        Returns list of result dicts.
+        """
+        if not self._guard(): return []
+        from poster import list_queue, mark_done, mark_failed
+        results  = []
+        pending  = list_queue()
+
+        for post in pending:
+            if not post["ready"]:
+                self._lp(f"Skipping  {post['name']}  not yet scheduled", "info")
+                continue
+
+            # Check if this post is meant for this account
+            target_accounts = post["meta"].get("accounts", [])
+            if target_accounts and self.username not in target_accounts:
+                continue
+
+            self._lp(f"Publishing from queue  {post['name']}", "header")
+            result = self.publisher.publish_from_folder(post["path"])
+            result["name"] = post["name"]
+            results.append(result)
+
+            if result["ok"]:
+                mark_done(post["path"])
+                self._lp(f"Queued post done  {post['name']}", "success")
+            else:
+                mark_failed(post["path"], result.get("error", "unknown error"))
+                self._lp(f"Queued post failed  {post['name']}  {result.get('error')}", "warn")
+
+            # Human-like pause between posts
+            self.human.pause_between_posts()
+
         return results
 
     # ── STATS ─────────────────────────────────────────────────────────────────

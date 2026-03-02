@@ -131,6 +131,20 @@ def _create_schema(conn: sqlite3.Connection):
             media_count INTEGER
         );
 
+        -- ── POSTS  (publish history) ──────────────────────────────────────
+        -- One row per published post/story. post_type: photo | carousel | story_photo | story_video
+        CREATE TABLE IF NOT EXISTS posts (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            username    TEXT    NOT NULL,
+            post_type   TEXT    NOT NULL,
+            caption     TEXT    NOT NULL DEFAULT '',
+            location    TEXT    NOT NULL DEFAULT '',
+            media_pk    TEXT    NOT NULL DEFAULT '',
+            has_music   INTEGER NOT NULL DEFAULT 0,
+            ts          TEXT    NOT NULL,
+            date        TEXT    NOT NULL
+        );
+
         -- ── INDEXES ───────────────────────────────────────────────────────
         CREATE INDEX IF NOT EXISTS idx_actions_username      ON actions(username);
         CREATE INDEX IF NOT EXISTS idx_actions_date          ON actions(date);
@@ -138,6 +152,8 @@ def _create_schema(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_actions_type          ON actions(username, action_type);
         CREATE INDEX IF NOT EXISTS idx_snapshots_username    ON snapshots(username);
         CREATE INDEX IF NOT EXISTS idx_snapshots_ts          ON snapshots(username, ts);
+        CREATE INDEX IF NOT EXISTS idx_posts_username        ON posts(username);
+        CREATE INDEX IF NOT EXISTS idx_posts_date            ON posts(username, date);
     """)
     conn.commit()
 
@@ -657,3 +673,94 @@ def migrate_from_json(json_path: str = "data/stats.json") -> dict:
 
     cur.close()
     return summary
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POSTS  —  publish history
+# ─────────────────────────────────────────────────────────────────────────────
+
+def record_post(
+    username:  str,
+    post_type: str,
+    caption:   str = "",
+    location:  str = "",
+    media_pk:  str = "",
+    has_music: bool = False,
+):
+    """
+    Record a successful publish event to the posts table.
+    Called by poster.Publisher._record_post() after every upload.
+    post_type: photo | carousel | story_photo | story_video
+    """
+    now = datetime.now().isoformat(timespec="seconds")
+    day = date.today().isoformat()
+
+    with _tx() as cur:
+        _ensure_account(cur, username)
+        cur.execute(
+            """INSERT INTO posts
+               (username, post_type, caption, location, media_pk, has_music, ts, date)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (username, post_type, caption[:200], location[:100],
+             media_pk, int(has_music), now, day)
+        )
+        _touch_account(cur, username)
+
+
+def get_post_history(username: str, limit: int = 50) -> list:
+    """
+    Return the last N posts for an account, newest first.
+    Each entry: {id, post_type, caption, location, media_pk, has_music, ts, date}
+    """
+    return query(
+        """SELECT id, post_type, caption, location, media_pk, has_music, ts, date
+           FROM posts WHERE username = ?
+           ORDER BY ts DESC LIMIT ?""",
+        (username, limit)
+    )
+
+
+def get_post_summary(username: str) -> dict:
+    """
+    Return aggregate post counts per type for an account.
+    {total, photo, carousel, story_photo, story_video, last_7_days}
+    """
+    conn = _get_conn()
+    cur  = conn.cursor()
+
+    cur.execute(
+        "SELECT post_type, COUNT(*) as cnt FROM posts WHERE username=? GROUP BY post_type",
+        (username,)
+    )
+    by_type = {r["post_type"]: r["cnt"] for r in cur.fetchall()}
+
+    since_7d = (date.today() - timedelta(days=7)).isoformat()
+    cur.execute(
+        "SELECT COUNT(*) as cnt FROM posts WHERE username=? AND date >= ?",
+        (username, since_7d)
+    )
+    row   = cur.fetchone()
+    week  = row["cnt"] if row else 0
+    cur.close()
+
+    return {
+        "total":       sum(by_type.values()),
+        "photo":       by_type.get("photo", 0),
+        "carousel":    by_type.get("carousel", 0),
+        "story_photo": by_type.get("story_photo", 0),
+        "story_video": by_type.get("story_video", 0),
+        "last_7_days": week,
+    }
+
+
+def get_all_post_summaries() -> list:
+    """
+    Return post summary dicts for all known accounts.
+    Used by the CLI publishing stats view.
+    """
+    usernames = get_all_usernames()
+    return [
+        {"username": u, **get_post_summary(u)}
+        for u in usernames
+        if get_post_summary(u)["total"] > 0
+    ]

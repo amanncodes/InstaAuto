@@ -1123,8 +1123,248 @@ MENU_ITEMS = [
     ("M", "Manual Task Trigger  build  presets  history  quick-fire"),
     ("T", "Run Config Tasks     tasks defined in config.yaml"),
     ("S", "Scheduler            recurring automated jobs"),
+    ("C", "Account Manager     add  remove  login  logout  relogin  status"),
     ("0", "Exit"),
 ]
+
+
+def _save_config(cfg: dict):
+    """Write config dict back to config/config.yaml."""
+    import yaml
+    with open("config/config.yaml", "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+
+
+def menu_account_manager(manager, cfg):
+    while True:
+        hdr("ACCOUNT MANAGER")
+
+        # Always show current account table
+        print_accounts_table(manager)
+        rule()
+
+        opts = [
+            ("1", "Add account          username + password  [saves to config.yaml]"),
+            ("2", "Remove account       delete from config + logout"),
+            ("3", "Login account        login a specific offline account"),
+            ("4", "Logout account       clear session for a specific account"),
+            ("5", "Relogin account      refresh session without full re-auth"),
+            ("6", "Login all offline    attempt login on every OFFLINE account"),
+            ("7", "Account status       detailed info on a specific account"),
+            ("0", "Back"),
+        ]
+        for k, v in opts:
+            console.print(f"  [{k}]  {v}")
+        rule()
+        choice = Prompt.ask("  Select", choices=[o[0] for o in opts])
+
+        # ── 0. Back ───────────────────────────────────────────────────────────
+        if choice == "0":
+            break
+
+        # ── 1. Add account ────────────────────────────────────────────────────
+        elif choice == "1":
+            hdr("ADD ACCOUNT")
+            username = Prompt.ask("  Instagram username").strip().lstrip("@")
+            if not username:
+                warn("Username cannot be empty"); continue
+
+            # Check not already loaded
+            existing = [b.username for b in manager.bots]
+            if username in existing:
+                warn(f"@{username} is already loaded in this session"); continue
+
+            password = Prompt.ask("  Password", password=True)
+            proxy    = Prompt.ask("  Proxy  [http://user:pass@host:port, blank to skip]", default="").strip()
+            profile  = Prompt.ask("  Behaviour profile", choices=["active","moderate","conservative"], default="active")
+
+            # Build account config dict
+            account_cfg = {
+                "username": username,
+                "password": password,
+                "behaviour_profile": profile,
+            }
+            if proxy:
+                account_cfg["proxy"] = proxy
+
+            # Instantiate bot and attempt login
+            info(f"Creating bot for @{username}...")
+            from bot_engine import InstagramBot
+            bot = InstagramBot(account_cfg)
+
+            with console.status(f"[bold cyan]  Logging in @{username}...[/bold cyan]"):
+                success = bot.login()
+
+            if success:
+                manager.bots.append(bot)
+                ok(f"@{username} added and logged in")
+
+                # Persist to config.yaml
+                save_to_config = Confirm.ask("  Save to config.yaml so it loads on next startup?", default=True)
+                if save_to_config:
+                    cfg["accounts"].append(account_cfg)
+                    try:
+                        _save_config(cfg)
+                        ok(f"Saved @{username} to config/config.yaml")
+                    except Exception as e:
+                        warn(f"Could not save config: {e}")
+            else:
+                warn(f"Login failed for @{username} — not added. Check credentials.")
+
+        # ── 2. Remove account ─────────────────────────────────────────────────
+        elif choice == "2":
+            if not manager.bots:
+                warn("No accounts loaded"); continue
+
+            usernames = [b.username for b in manager.bots]
+            username  = Prompt.ask("  Remove account", choices=usernames)
+            bot       = next(b for b in manager.bots if b.username == username)
+
+            if not Confirm.ask(f"  Remove @{username}? This will logout and delete from config.", default=False):
+                info("Cancelled"); continue
+
+            # Logout cleanly
+            if bot.logged_in:
+                try:
+                    bot.cl.logout()
+                    info(f"Logged out @{username}")
+                except Exception:
+                    pass
+            # Delete session file
+            if bot.session_file.exists():
+                bot.session_file.unlink()
+                info(f"Session file deleted")
+
+            # Remove from manager
+            manager.bots = [b for b in manager.bots if b.username != username]
+
+            # Remove from config dict and save
+            cfg["accounts"] = [a for a in cfg["accounts"] if a["username"] != username]
+            try:
+                _save_config(cfg)
+                ok(f"@{username} removed from config/config.yaml")
+            except Exception as e:
+                warn(f"Removed from session but could not update config: {e}")
+
+            ok(f"@{username} removed")
+
+        # ── 3. Login specific account ─────────────────────────────────────────
+        elif choice == "3":
+            offline = [b for b in manager.bots if not b.logged_in]
+            if not offline:
+                ok("All accounts are already logged in"); continue
+
+            usernames = [b.username for b in offline]
+            username  = Prompt.ask("  Login which account", choices=usernames)
+            bot       = next(b for b in offline if b.username == username)
+
+            with console.status(f"[bold cyan]  Logging in @{username}...[/bold cyan]"):
+                success = bot.login()
+
+            if success:
+                ok(f"@{username} is now logged in")
+            else:
+                warn(f"Login failed for @{username}")
+
+        # ── 4. Logout specific account ────────────────────────────────────────
+        elif choice == "4":
+            active = [b for b in manager.bots if b.logged_in]
+            if not active:
+                warn("No accounts are currently logged in"); continue
+
+            usernames = [b.username for b in active]
+            username  = Prompt.ask("  Logout which account", choices=usernames)
+            bot       = next(b for b in active if b.username == username)
+
+            try:
+                with console.status(f"[bold cyan]  Logging out @{username}...[/bold cyan]"):
+                    bot.cl.logout()
+                bot.logged_in = False
+                # Delete session file so next login is fresh
+                if bot.session_file.exists():
+                    bot.session_file.unlink()
+                ok(f"@{username} logged out and session cleared")
+            except Exception as e:
+                warn(f"Logout error: {e}")
+                bot.logged_in = False
+                info("Marked as offline regardless")
+
+        # ── 5. Relogin specific account ───────────────────────────────────────
+        elif choice == "5":
+            if not manager.bots:
+                warn("No accounts loaded"); continue
+
+            usernames = [b.username for b in manager.bots]
+            username  = Prompt.ask("  Relogin which account", choices=usernames)
+            bot       = next(b for b in manager.bots if b.username == username)
+
+            info(f"Using cl.relogin() — reuses existing device fingerprint, less suspicious than fresh login")
+            with console.status(f"[bold cyan]  Relogging in @{username}...[/bold cyan]"):
+                success = bot._do_relogin()
+
+            if success:
+                ok(f"@{username} session refreshed")
+            else:
+                warn(f"Relogin failed — try option 3 (Login) for a full fresh login")
+
+        # ── 6. Login all offline ──────────────────────────────────────────────
+        elif choice == "6":
+            offline = [b for b in manager.bots if not b.logged_in]
+            if not offline:
+                ok("All accounts are already logged in"); continue
+
+            info(f"Attempting login on {len(offline)} offline account(s)...")
+            concurrent = ask_concurrent()
+
+            def _login(b):
+                with console.status(f"[bold cyan]  Logging in @{b.username}...[/bold cyan]"):
+                    success = b.login()
+                if success:
+                    ok(f"@{b.username} logged in")
+                else:
+                    warn(f"@{b.username} login failed")
+
+            run_on_bots(offline, _login, concurrent)
+            print_accounts_table(manager)
+
+        # ── 7. Account status ─────────────────────────────────────────────────
+        elif choice == "7":
+            if not manager.bots:
+                warn("No accounts loaded"); continue
+
+            usernames = [b.username for b in manager.bots]
+            username  = Prompt.ask("  Account", choices=usernames)
+            bot       = next(b for b in manager.bots if b.username == username)
+
+            status_color = "[bright_green]ONLINE[/bright_green]" if bot.logged_in else "[bright_red]OFFLINE[/bright_red]"
+            device  = f"{bot._device['manufacturer']} {bot._device['model']}" if hasattr(bot, "_device") else "—"
+            locale  = bot._locale["locale"] if hasattr(bot, "_locale") else "—"
+            tz      = f"UTC{bot._locale['tz_offset']//3600:+d}" if hasattr(bot, "_locale") else "—"
+
+            today = bot.session.actions_today
+            limits = bot.session.daily_limits
+
+            console.print(Panel(
+                f"  Status:    {status_color}\n"
+                f"  Username:  [bold white]@{bot.username}[/bold white]\n"
+                f"  Profile:   {bot.session.profile}\n"
+                f"  Device:    [dim]{device}[/dim]\n"
+                f"  Locale:    [dim]{locale}  {tz}[/dim]\n"
+                f"  Proxy:     [dim]{bot.proxy or 'none'}[/dim]\n"
+                f"  Session:   [dim]{bot.session_file}  ({'exists' if bot.session_file.exists() else 'not saved'})[/dim]\n"
+                f"  Fatigue:   [cyan]{bot.session.fatigue_level:.0%}[/cyan]\n"
+                f"\n"
+                f"  Today's actions\n"
+                f"  [dim]{'─'*40}[/dim]\n"
+                f"  Likes:       {today.get('likes',0)} / {limits.get('likes',0)}\n"
+                f"  Comments:    {today.get('comments',0)} / {limits.get('comments',0)}\n"
+                f"  Follows:     {today.get('follows',0)} / {limits.get('follows',0)}\n"
+                f"  Unfollows:   {today.get('unfollows',0)} / {limits.get('unfollows',0)}\n"
+                f"  DMs:         {today.get('dms',0)} / {limits.get('dms',0)}\n"
+                f"  Story views: {today.get('story_views',0)} / {limits.get('story_views',0)}",
+                title=f"  ACCOUNT STATUS  @{bot.username}",
+                border_style="cyan", title_align="left",
+            ))
 
 def main():
     os.makedirs("logs",     exist_ok=True)
@@ -1196,6 +1436,7 @@ def main():
                 manager.run_all_tasks(tasks)
                 done()
         elif choice == "S": menu_scheduler(manager, cfg)
+        elif choice == "C": menu_account_manager(manager, cfg)
 
 
 if __name__ == "__main__":
