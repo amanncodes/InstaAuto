@@ -12,6 +12,7 @@ Instagram Bot Engine
 import time
 import random
 import logging
+import threading
 from pathlib import Path
 from datetime import datetime
 
@@ -21,6 +22,10 @@ from instagrapi.exceptions import (
     ReloginAttemptExceeded, FeedbackRequired,
     PleaseWaitFewMinutes, UserNotFound, RateLimitError,
 )
+try:
+    from instagrapi.mixins.challenge import ChallengeChoice
+except ImportError:
+    ChallengeChoice = None
 
 from human_behaviour import HumanBehaviour, SessionState, lp, lw, MAX_WAIT
 from stats_store import (
@@ -111,6 +116,13 @@ class InstagramBot:
         # Publisher is lazy-initialised on first use after login
         self._publisher: Publisher | None = None
 
+        # Keep-alive background thread
+        self._keepalive_thread: threading.Thread | None = None
+        self._keepalive_stop   = threading.Event()
+        self._last_ping:  str  = 'never'
+        self._ping_fails:  int = 0
+        self._keepalive_interval: int = 0  # hours, 0 = disabled
+
     @property
     def publisher(self) -> Publisher:
         if self._publisher is None:
@@ -147,47 +159,103 @@ class InstagramBot:
 
     # ── AUTH & RELOGIN ────────────────────────────────────────────────────────
 
+    # How old a session file can be before we bother verifying it with a live
+    # API call.  Sessions verified within this window are trusted as-is.
+    SESSION_VERIFY_AFTER_HOURS = 6   # verify if last check was >6h ago
+
+    def _session_needs_verify(self) -> bool:
+        """
+        Returns True if the session file is old enough that we should confirm
+        it's still alive with a get_timeline_feed() call.
+        Skips the live check entirely for recently-saved sessions.
+        """
+        try:
+            age_secs = time.time() - self.session_file.stat().st_mtime
+            age_hrs  = age_secs / 3600
+            if age_hrs < self.SESSION_VERIFY_AFTER_HOURS:
+                self._lp(
+                    f"Session file is {age_hrs:.1f}h old — skipping live verify "
+                    f"(threshold={self.SESSION_VERIFY_AFTER_HOURS}h)",
+                    "info",
+                )
+                return False
+            return True
+        except Exception:
+            return True   # if we can't stat the file, verify to be safe
+
     def login(self) -> bool:
+        """
+        Session restore / login flow:
+
+        1.  If sessions/{username}.json exists:
+              a.  Load settings (restores token — NO login() call needed)
+              b.  If session is fresh (< SESSION_VERIFY_AFTER_HOURS old):
+                    → mark logged_in = True, done.  Zero API calls.
+              c.  If session is older:
+                    → call get_timeline_feed() to confirm it's still alive
+                    → on LoginRequired → relogin via cl.relogin()
+                    → on success → dump refreshed session to disk
+
+        2.  If no session file:
+              → fresh credential login via cl.login(username, password)
+              → save session to disk
+
+        This avoids the old bug of calling cl.login() after load_settings(),
+        which triggered a full re-auth on every startup.
+        """
         self._lp("Login sequence starting", "api")
-        self._lp(f"Device   {self._device['manufacturer']} {self._device['model']}  /  Locale {self._locale['locale']}", "info")
+        self._lp(
+            f"Device  {self._device['manufacturer']} {self._device['model']}"
+            f"  /  Locale {self._locale['locale']}",
+            "info",
+        )
 
         try:
             if self.session_file.exists():
+                # ── Restore from saved session ─────────────────────────────
                 self._lp(f"Loading saved session  {self.session_file}", "info")
                 self.cl.load_settings(str(self.session_file))
-                self._lp("Authenticating with saved session via API", "api")
-                self.cl.login(self.username, self.password)
-                # Verify session is actually valid
-                self._lp("Verifying session with timeline feed request", "api")
-                self.cl.get_timeline_feed()
-                self._lp("Session verified", "success")
+
+                if not self._session_needs_verify():
+                    # Session is fresh — trust it without an API round-trip
+                    self.logged_in = True
+                    self._lp(f"Session restored (no verify needed)  @{self.username}", "success")
+                    return True
+
+                # Session is older — do a lightweight live check
+                self._lp("Session age > threshold — verifying with timeline feed", "api")
+                try:
+                    self.cl.get_timeline_feed()
+                    self.cl.dump_settings(str(self.session_file))   # refresh mtime
+                    self.logged_in = True
+                    self._lp(f"Session verified and refreshed  @{self.username}", "success")
+                    return True
+
+                except LoginRequired:
+                    self._lp("Session expired — attempting relogin", "warn")
+                    return self._do_relogin()
+
             else:
+                # ── Fresh credential login ─────────────────────────────────
                 self._lp("No saved session — fresh credential login", "info")
-                self._lp("Sending credentials to Instagram API", "api")
                 self.cl.login(self.username, self.password)
-                self._lp(f"Saving session to  {self.session_file}", "info")
                 self.cl.dump_settings(str(self.session_file))
-
-            self.logged_in = True
-            self._lp(f"Logged in as  @{self.username}", "success")
-            return True
-
-        except LoginRequired:
-            self._lp("Session expired — attempting relogin via cl.relogin()", "warn")
-            return self._do_relogin()
+                self.logged_in = True
+                self._lp(f"Logged in (fresh)  @{self.username}", "success")
+                return True
 
         except BadPassword:
             self._lp("Bad password — check credentials in config.yaml", "warn")
             return False
 
         except ChallengeRequired:
-            self._lp("Challenge required — check your email or SMS inbox", "warn")
-            return False
+            self._lp("Challenge required — attempting interactive resolution", "warn")
+            return self._resolve_challenge()
 
         except Exception as e:
-            # Session may be stale — wipe it and retry once
+            # Last resort: wipe stale session and retry with credentials
             if self.session_file.exists():
-                self._lp(f"Login error: {e}  — wiping stale session and retrying", "warn")
+                self._lp(f"Unexpected error: {e}  — wiping session and retrying fresh", "warn")
                 self.session_file.unlink(missing_ok=True)
                 try:
                     self.cl.login(self.username, self.password)
@@ -215,6 +283,59 @@ class InstagramBot:
             return False
         except Exception as e:
             self._lp(f"Relogin failed: {e}", "warn")
+            return False
+
+    def set_challenge_code_handler(self, handler_fn):
+        """
+        Attach an interactive code-prompt function to the instagrapi client.
+        handler_fn signature:  fn(username: str, choice: ChallengeChoice) -> str
+
+        Called by the CLI before login so the terminal can ask the user for
+        the emailed / SMS OTP code without blocking other bot threads.
+
+        Example (used by cli.py):
+            def _ask_code(username, choice):
+                kind = "email" if choice == ChallengeChoice.EMAIL else "SMS"
+                return input(f"Enter {kind} code for @{username}: ").strip()
+            bot.set_challenge_code_handler(_ask_code)
+        """
+        self.cl.challenge_code_handler = handler_fn
+        self._lp("Challenge code handler registered", "info")
+
+    def _resolve_challenge(self) -> bool:
+        """
+        Called when ChallengeRequired is raised during login.
+        Tries cl.challenge_resolve(last_json) which will invoke the
+        challenge_code_handler if one has been registered.
+        Falls back to a plain input() prompt if no handler is set.
+        """
+        try:
+            # Ensure there is always a handler — fall back to stdin if none set
+            if not callable(getattr(self.cl, "challenge_code_handler", None)):
+                def _stdin_handler(username, choice):
+                    if ChallengeChoice and choice == ChallengeChoice.EMAIL:
+                        kind = "email"
+                    elif ChallengeChoice and choice == ChallengeChoice.SMS:
+                        kind = "SMS"
+                    else:
+                        kind = "email/SMS"
+                    self._lp(
+                        f"Challenge: check your {kind} inbox for @{username}",
+                        "warn",
+                    )
+                    code = input(f"  Enter 6-digit code for @{username}: ").strip()
+                    return code
+                self.cl.challenge_code_handler = _stdin_handler
+
+            self._lp("Resolving challenge via challenge_resolve()", "api")
+            self.cl.challenge_resolve(self.cl.last_json)
+            self.cl.dump_settings(str(self.session_file))
+            self.logged_in = True
+            self._lp(f"Challenge resolved — logged in as @{self.username}", "success")
+            return True
+
+        except Exception as e:
+            self._lp(f"Challenge resolution failed: {e}", "warn")
             return False
 
     def _handle_exception(self, e: Exception, action: str) -> bool:
@@ -782,6 +903,112 @@ class InstagramBot:
             self.human.pause_between_posts()
 
         return results
+
+    # ── KEEP-ALIVE ───────────────────────────────────────────────────────────────
+
+    def start_keepalive(self, interval_hours: int = 2):
+        """
+        Start a background thread that pings Instagram every interval_hours
+        to keep the session alive. Automatically re-logins if the ping fails.
+
+        interval_hours: how often to ping (default 2h, min 1h, max 12h)
+        """
+        interval_hours = max(1, min(12, interval_hours))
+
+        if self._keepalive_thread and self._keepalive_thread.is_alive():
+            self._lp("Keep-alive already running — stop it first", "warn")
+            return
+
+        self._keepalive_stop.clear()
+        self._keepalive_interval = interval_hours
+        self._keepalive_thread   = threading.Thread(
+            target=self._keepalive_loop,
+            args=(interval_hours,),
+            daemon=True,    # dies when main process exits
+            name=f"keepalive-{self.username}",
+        )
+        self._keepalive_thread.start()
+        self._lp(
+            f"Keep-alive started  interval={interval_hours}h  "
+            f"[pings Instagram every {interval_hours*60} min to refresh session]",
+            "success",
+        )
+
+    def stop_keepalive(self):
+        """Stop the background keep-alive thread for this account."""
+        if self._keepalive_thread and self._keepalive_thread.is_alive():
+            self._keepalive_stop.set()
+            self._keepalive_thread.join(timeout=5)
+            self._lp("Keep-alive stopped", "info")
+        else:
+            self._lp("Keep-alive was not running", "info")
+        self._keepalive_interval = 0
+
+    def _keepalive_loop(self, interval_hours: int):
+        """
+        Background loop — sleeps for interval_hours then pings get_timeline_feed().
+        On failure: attempts relogin up to 3 times before giving up.
+        Writes refreshed session to disk on every successful ping.
+        """
+        interval_secs = interval_hours * 3600
+        self._lp(f"Keep-alive loop started  next ping in {interval_hours}h", "info")
+
+        while not self._keepalive_stop.wait(timeout=interval_secs):
+            if not self.logged_in:
+                self._lp("Keep-alive: account offline — skipping ping", "warn")
+                continue
+
+            self._lp("Keep-alive: pinging Instagram (get_timeline_feed)", "api")
+            try:
+                self.cl.get_timeline_feed()
+                self.cl.dump_settings(str(self.session_file))
+                self._last_ping  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self._ping_fails = 0
+                self._lp(f"Keep-alive: ping OK  session refreshed  [{self._last_ping}]", "success")
+
+            except LoginRequired:
+                self._ping_fails += 1
+                self._lp(f"Keep-alive: session expired (ping fail #{self._ping_fails}) — attempting relogin", "warn")
+                if self._do_relogin():
+                    self._last_ping  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    self._ping_fails = 0
+                    self._lp("Keep-alive: relogin successful — session restored", "success")
+                elif self._ping_fails >= 3:
+                    self._lp("Keep-alive: 3 consecutive failures — stopping keep-alive", "warn")
+                    self.logged_in = False
+                    break
+
+            except Exception as e:
+                self._ping_fails += 1
+                self._lp(f"Keep-alive: ping error ({e})  fail #{self._ping_fails}", "warn")
+                if self._ping_fails >= 3:
+                    self._lp("Keep-alive: 3 consecutive errors — stopping keep-alive", "warn")
+                    break
+
+        self._lp("Keep-alive loop exited", "info")
+
+    def ping_session(self) -> bool:
+        """
+        One-shot manual session ping. Returns True if session is alive.
+        Also refreshes the session file and updates _last_ping.
+        """
+        if not self.logged_in:
+            self._lp("Cannot ping — not logged in", "warn")
+            return False
+        try:
+            self._lp("Manual session ping", "api")
+            self.cl.get_timeline_feed()
+            self.cl.dump_settings(str(self.session_file))
+            self._last_ping  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._ping_fails = 0
+            self._lp(f"Session alive  [{self._last_ping}]", "success")
+            return True
+        except LoginRequired:
+            self._lp("Session expired — attempting relogin", "warn")
+            return self._do_relogin()
+        except Exception as e:
+            self._lp(f"Ping failed: {e}", "warn")
+            return False
 
     # ── STATS ─────────────────────────────────────────────────────────────────
 
