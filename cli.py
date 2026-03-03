@@ -199,6 +199,35 @@ def done():
     ok("Task complete")
 
 
+def _register_challenge_handler(bot):
+    """
+    Attach an interactive terminal prompt as the challenge code handler
+    for a bot. Must be called before bot.login() so that if Instagram
+    sends an email/SMS OTP the user is prompted right in the terminal.
+    """
+    try:
+        from instagrapi.mixins.challenge import ChallengeChoice as _CC
+    except ImportError:
+        _CC = None
+
+    def _ask_code(username, choice):
+        if _CC and choice == _CC.EMAIL:
+            kind = "EMAIL"
+        elif _CC and choice == _CC.SMS:
+            kind = "SMS"
+        else:
+            kind = "EMAIL/SMS"
+        console.print(
+            f"\n  [bold bright_yellow]Challenge required for @{username}[/bold bright_yellow]\n"
+            f"  Instagram sent a [bold]{kind}[/bold] verification code.\n"
+            f"  Check your inbox and enter the 6-digit code below.\n"
+        )
+        code = Prompt.ask(f"  Enter code for @{username}").strip()
+        return code
+
+    bot.set_challenge_code_handler(_ask_code)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MENU HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1086,8 +1115,6 @@ def menu_publish(manager, cfg):
         console.print(t)
         info("Copy a Track ID and use it as  music_track_id  in your meta.yaml or in the story poster above")
 
-    done()
-
 def menu_scheduler(manager, cfg):
     hdr("SCHEDULER")
     schedule_cfg = cfg.get("schedule", [])
@@ -1153,6 +1180,8 @@ def menu_account_manager(manager, cfg):
             ("5", "Relogin account      refresh session without full re-auth"),
             ("6", "Login all offline    attempt login on every OFFLINE account"),
             ("7", "Account status       detailed info on a specific account"),
+            ("8", "Keep-alive           start / stop / status of session heartbeat"),
+            ("9", "Ping sessions        manual one-shot session health check all accounts"),
             ("0", "Back"),
         ]
         for k, v in opts:
@@ -1193,6 +1222,7 @@ def menu_account_manager(manager, cfg):
             info(f"Creating bot for @{username}...")
             from bot_engine import InstagramBot
             bot = InstagramBot(account_cfg)
+            _register_challenge_handler(bot)
 
             with console.status(f"[bold cyan]  Logging in @{username}...[/bold cyan]"):
                 success = bot.login()
@@ -1260,6 +1290,7 @@ def menu_account_manager(manager, cfg):
             username  = Prompt.ask("  Login which account", choices=usernames)
             bot       = next(b for b in offline if b.username == username)
 
+            _register_challenge_handler(bot)
             with console.status(f"[bold cyan]  Logging in @{username}...[/bold cyan]"):
                 success = bot.login()
 
@@ -1301,6 +1332,7 @@ def menu_account_manager(manager, cfg):
             bot       = next(b for b in manager.bots if b.username == username)
 
             info(f"Using cl.relogin() — reuses existing device fingerprint, less suspicious than fresh login")
+            _register_challenge_handler(bot)
             with console.status(f"[bold cyan]  Relogging in @{username}...[/bold cyan]"):
                 success = bot._do_relogin()
 
@@ -1319,6 +1351,7 @@ def menu_account_manager(manager, cfg):
             concurrent = ask_concurrent()
 
             def _login(b):
+                _register_challenge_handler(b)
                 with console.status(f"[bold cyan]  Logging in @{b.username}...[/bold cyan]"):
                     success = b.login()
                 if success:
@@ -1326,7 +1359,7 @@ def menu_account_manager(manager, cfg):
                 else:
                     warn(f"@{b.username} login failed")
 
-            run_on_bots(offline, _login, concurrent)
+            run_on_bots(offline, _login, concurrent=False)  # sequential — OTP prompts must not overlap
             print_accounts_table(manager)
 
         # ── 7. Account status ─────────────────────────────────────────────────
@@ -1367,6 +1400,88 @@ def menu_account_manager(manager, cfg):
                 title=f"  ACCOUNT STATUS  @{bot.username}",
                 border_style="cyan", title_align="left",
             ))
+
+        # ── 8. Keep-alive ─────────────────────────────────────────────────────
+        elif choice == "8":
+            if not manager.bots:
+                warn("No accounts loaded"); continue
+
+            # Show current keep-alive status for all accounts
+            t = Table(title="  KEEP-ALIVE STATUS", show_header=True,
+                      header_style="bold cyan", box=box.SIMPLE_HEAD)
+            t.add_column("Account",   style="bold white", min_width=18)
+            t.add_column("Status",    justify="center")
+            t.add_column("Interval",  justify="center")
+            t.add_column("Last Ping", style="dim")
+            t.add_column("Fail Count",justify="center")
+            for bot in manager.bots:
+                alive   = bot._keepalive_thread and bot._keepalive_thread.is_alive()
+                status  = "[bright_green]RUNNING[/bright_green]" if alive else "[dim]stopped[/dim]"
+                ivl     = f"{bot._keepalive_interval}h" if alive else "—"
+                fails   = str(bot._ping_fails) if bot._ping_fails else "—"
+                t.add_row(f"@{bot.username}", status, ivl, bot._last_ping, fails)
+            console.print(t)
+            rule()
+
+            ka_opts = [
+                ("1", "Start keep-alive    for one account"),
+                ("2", "Start keep-alive    for ALL logged-in accounts"),
+                ("3", "Stop keep-alive     for one account"),
+                ("4", "Stop keep-alive     for ALL accounts"),
+                ("0", "Back"),
+            ]
+            for k, v in ka_opts: console.print(f"  [{k}]  {v}")
+            rule()
+            ka_choice = Prompt.ask("  Select", choices=[o[0] for o in ka_opts])
+
+            if ka_choice == "0":
+                continue
+
+            elif ka_choice in ("1", "3"):
+                usernames = [b.username for b in manager.bots]
+                username  = Prompt.ask("  Account", choices=usernames)
+                bot       = next(b for b in manager.bots if b.username == username)
+                if ka_choice == "1":
+                    if not bot.logged_in:
+                        warn(f"@{username} is not logged in — login first"); continue
+                    hrs = int(Prompt.ask("  Ping interval (hours)", default="2"))
+                    bot.start_keepalive(hrs)
+                    ok(f"Keep-alive started for @{username}  every {hrs}h")
+                else:
+                    bot.stop_keepalive()
+                    ok(f"Keep-alive stopped for @{username}")
+
+            elif ka_choice == "2":
+                active = [b for b in manager.bots if b.logged_in]
+                if not active:
+                    warn("No logged-in accounts"); continue
+                hrs = int(Prompt.ask("  Ping interval (hours)", default="2"))
+                for bot in active:
+                    bot.start_keepalive(hrs)
+                ok(f"Keep-alive started for {len(active)} account(s)  every {hrs}h")
+
+            elif ka_choice == "4":
+                for bot in manager.bots:
+                    bot.stop_keepalive()
+                ok("Keep-alive stopped for all accounts")
+
+        # ── 9. Ping sessions ───────────────────────────────────────────────────
+        elif choice == "9":
+            active = [b for b in manager.bots if b.logged_in]
+            if not active:
+                warn("No logged-in accounts"); continue
+
+            info(f"Pinging {len(active)} session(s)...")
+            t = Table(title="  SESSION HEALTH CHECK", show_header=True,
+                      header_style="bold cyan", box=box.SIMPLE_HEAD)
+            t.add_column("Account",   style="bold white", min_width=18)
+            t.add_column("Result",    justify="center")
+            t.add_column("Last Ping", style="dim")
+            for bot in active:
+                alive = bot.ping_session()
+                result = "[bright_green]ALIVE[/bright_green]" if alive else "[bright_red]DEAD[/bright_red]"
+                t.add_row(f"@{bot.username}", result, bot._last_ping)
+            console.print(t)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1698,10 +1813,44 @@ def main():
     manager = AccountManager(cfg["accounts"])
     print_accounts_table(manager)
 
-    if Confirm.ask("\n  Login all accounts now?", default=True):
-        with console.status("[bold cyan]  Logging in all accounts...[/bold cyan]"):
-            manager.login_all(concurrent=True)
-        print_accounts_table(manager)
+    # ── Auto-restore saved sessions ──────────────────────────────────────────
+    # Any account that has a sessions/{username}.json gets restored silently.
+    # Only accounts with no session file prompt for credentials.
+    has_sessions  = [b for b in manager.bots if b.session_file.exists()]
+    no_sessions   = [b for b in manager.bots if not b.session_file.exists()]
+
+    if has_sessions:
+        info(f"Auto-restoring {len(has_sessions)} saved session(s)...")
+        for bot in has_sessions:
+            _register_challenge_handler(bot)
+            with console.status(f"[bold cyan]  Restoring @{bot.username}...[/bold cyan]"):
+                ok_  = bot.login()
+            if ok_:
+                ok(f"@{bot.username} session restored")
+            else:
+                warn(f"@{bot.username} session expired — needs fresh login")
+
+    if no_sessions:
+        info(f"{len(no_sessions)} account(s) have no saved session")
+        if Confirm.ask("  Login these accounts now?", default=True):
+            for bot in no_sessions:
+                _register_challenge_handler(bot)
+                with console.status(f"[bold cyan]  Logging in @{bot.username}...[/bold cyan]"):
+                    ok_ = bot.login()
+                if ok_:
+                    ok(f"@{bot.username} logged in")
+                else:
+                    warn(f"@{bot.username} login failed")
+
+    # ── Auto-start keep-alive for all logged-in accounts ─────────────────────
+    keepalive_hrs = cfg.get("keep_alive_hours", 2)
+    if keepalive_hrs and keepalive_hrs > 0:
+        for bot in manager.bots:
+            if bot.logged_in:
+                bot.start_keepalive(keepalive_hrs)
+        info(f"Keep-alive started for all active accounts  interval={keepalive_hrs}h")
+
+    print_accounts_table(manager)
 
     while True:
         hdr("MAIN MENU")

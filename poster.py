@@ -445,13 +445,13 @@ class Publisher:
 
         try:
             self._lp("Uploading photo via API", "api")
-            media = self.cl.photo_upload(
-                path     = str(image_path),
-                caption  = caption,
-                location = location,
-                usertags = usertags or None,
-                extra_data = {"custom_accessibility_caption": caption[:100]},
-            )
+            kwargs = {
+                "path":    str(image_path),
+                "caption": caption,
+            }
+            if location:            kwargs["location"] = location
+            if usertags:            kwargs["usertags"] = usertags
+            media = self.cl.photo_upload(**kwargs)
             self._lp(f"Photo posted  pk={media.pk}  @{self.user}", "success")
             self._record_post("photo", meta, media.pk)
             return {"ok": True, "pk": str(media.pk), "type": "photo"}
@@ -491,12 +491,13 @@ class Publisher:
 
         try:
             self._lp("Uploading carousel via API", "api")
-            media = self.cl.album_upload(
-                paths    = [str(p) for p in image_paths],
-                caption  = caption,
-                location = location,
-                usertags = usertags or None,
-            )
+            kwargs = {
+                "paths":   [str(p) for p in image_paths],
+                "caption": caption,
+            }
+            if location:  kwargs["location"] = location
+            if usertags:  kwargs["usertags"] = usertags
+            media = self.cl.album_upload(**kwargs)
             self._lp(f"Carousel posted  pk={media.pk}  @{self.user}", "success")
             self._record_post("carousel", meta, media.pk)
             return {"ok": True, "pk": str(media.pk), "type": "carousel"}
@@ -531,14 +532,13 @@ class Publisher:
 
         try:
             self._lp("Uploading story photo via API", "api")
-            media = self.cl.photo_upload_to_story(
-                path      = str(image_path),
-                mentions  = mentions  or None,
-                hashtags  = hashtags  or None,
-                locations = locations or None,
-                links     = links     or None,
-                extra_data = music_ed if music_ed else None,
-            )
+            kwargs = {"path": str(image_path)}
+            if mentions:  kwargs["mentions"]  = mentions
+            if hashtags:  kwargs["hashtags"]  = hashtags
+            if locations: kwargs["locations"] = locations
+            if links:     kwargs["links"]     = links
+            if music_ed:  kwargs["extra_data"] = music_ed
+            media = self.cl.photo_upload_to_story(**kwargs)
             self._lp(f"Story photo posted  pk={media.pk}  @{self.user}", "success")
             self._record_post("story_photo", meta, media.pk)
             return {"ok": True, "pk": str(media.pk), "type": "story_photo"}
@@ -568,14 +568,13 @@ class Publisher:
 
         try:
             self._lp("Uploading story video via API", "api")
-            media = self.cl.video_upload_to_story(
-                path      = str(video_path),
-                mentions  = mentions  or None,
-                hashtags  = hashtags  or None,
-                locations = locations or None,
-                links     = links     or None,
-                extra_data = music_ed if music_ed else None,
-            )
+            kwargs = {"path": str(video_path)}
+            if mentions:  kwargs["mentions"]  = mentions
+            if hashtags:  kwargs["hashtags"]  = hashtags
+            if locations: kwargs["locations"] = locations
+            if links:     kwargs["links"]     = links
+            if music_ed:  kwargs["extra_data"] = music_ed
+            media = self.cl.video_upload_to_story(**kwargs)
             self._lp(f"Story video posted  pk={media.pk}  @{self.user}", "success")
             self._record_post("story_video", meta, media.pk)
             return {"ok": True, "pk": str(media.pk), "type": "story_video"}
